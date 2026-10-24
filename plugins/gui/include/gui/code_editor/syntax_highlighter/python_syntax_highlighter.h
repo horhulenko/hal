@@ -26,6 +26,7 @@
 #pragma once
 
 #include <QRegularExpression>
+#include <QStringList>
 #include <QSyntaxHighlighter>
 #include <QTextCharFormat>
 
@@ -44,7 +45,7 @@ namespace hal
      *   <li> Double Quoted String ("string")
      *   <li> Keyword: self
      *   <li> Numbers (e.g. 42, 3.5, 0xDEADBEAF, 0765)
-     *   <li> Comments (single- and multiline)
+     *   <li> Comments
      * </ul>
      */
     class PythonSyntaxHighlighter : public QSyntaxHighlighter
@@ -68,8 +69,6 @@ namespace hal
         void highlightBlock(const QString& text) override;
 
     private:
-        int closeMultilineComment(const QString& text, const QRegularExpression& delimiter, const int offset = 0);
-
         /**
          * A single syntax highlighting rule, i.e., the pattern to match and the format to apply to it.
          */
@@ -79,11 +78,25 @@ namespace hal
             QTextCharFormat mFormat;
         };
 
+        /**
+         * A string, or a replacement field of an f-string, that is still open at some point while scanning a line.
+         */
+        struct ScanFrame
+        {
+            QChar mQuote;
+            bool mField        = false;
+            bool mTriple       = false;
+            bool mFormatted    = false;
+            bool mRaw          = false;
+            int mBracketDepth  = 0;
+            bool mInFormatSpec = false;
+        };
+
+        static int encodeState(const QVector<ScanFrame>& frames);
+        static QVector<ScanFrame> decodeState(int state);
+
         QVector<HighlightingRule> mHighlightingRules;
 
-        QRegularExpression mMultiLineCommentDelimiter;
-        QRegularExpression mTrippleSingleQuote;
-        QRegularExpression mTrippleDoubleQuote;
-        QRegularExpression mSingleLineComment;
+        QStringList mStringPrefixes;
     };
 }

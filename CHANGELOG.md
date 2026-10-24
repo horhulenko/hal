@@ -200,6 +200,7 @@ All notable changes to this project will be documented in this file.
     * added context menu entries to the GUI for `remove_buffers`, `unify_ff_outputs`, `split_luts`, and `split_shift_registers`, each applicable to the current selection or to the entire netlist
     * changed duplicating a view to place the modules and gates of the copy where they are in the original instead of laying the copy out anew
     * changed the modules widget to list the nets that belong to no module, i.e., the global inputs and outputs of the netlist and nets without any source or destination, below the top module when nets are shown, so that every net of the netlist appears in the tree
+    * changed the Python editor to highlight `'''` and `"""` strings that span several lines in the string color instead of the comment color
   * bugfixes
     * fixed the module trees keeping a net under its module after the net was marked as a global input or output, and leaving a net out after it was unmarked
     * fixed `Number of nets` in the details of a module showing the number of internal nets; it now counts every net with a source or a destination inside the module, as `Module::get_nets` returns them
@@ -224,8 +225,7 @@ All notable changes to this project will be documented in this file.
     * removed a leftover debug output that printed every search string of the log widget to stdout
     * fixed the option to copy the gate library into the project directory in the netlist import dialog staying enabled when the gate library is detected automatically, in which case there is no file to copy and the option had no effect
     * fixed action enable behavior in View Manager when deleting an entry
-    * fixed the Python editor highlighting a `#` inside a string as the start of a comment, and a `"""` or `'''` inside a comment as the start of a multi-line string
-    * fixed the Python editor ending a highlighted string at an escaped quote, so `"a \" b"` and `'it\'s'` are now highlighted as one string
+    * fixed the Python editor syntax highlighting losing track of where strings and comments start and end, e.g. a `#` inside a string, quotes inside a comment, escaped quotes, adjacent quotes such as `"a"""`, string prefixes, strings continued with a backslash, and nested quotes and comments in f-strings
 * Build and dependencies
   * changed the GUI from Qt 5 to Qt 6
   * updated the vendored QuaZip from 1.3 to 1.5 as part of the move to Qt 6

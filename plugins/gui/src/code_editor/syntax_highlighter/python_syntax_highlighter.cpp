@@ -3,8 +3,7 @@
 #include "gui/code_editor/syntax_highlighter/python_qss_adapter.h"
 namespace hal
 {
-    PythonSyntaxHighlighter::PythonSyntaxHighlighter(QTextDocument* parent)
-        : QSyntaxHighlighter(parent), mMultiLineCommentDelimiter("('''|\"\"\")"), mTrippleSingleQuote("'''"), mTrippleDoubleQuote("\"\"\"")
+    PythonSyntaxHighlighter::PythonSyntaxHighlighter(QTextDocument* parent) : QSyntaxHighlighter(parent), mStringPrefixes({"r", "u", "b", "f", "br", "rb", "fr", "rf"})
     //      //mKeywordColor(177, 240, 0),
     //      //mKeywordColor("#ffd200"),
     //      mKeywordColor("#CC7832"),
@@ -46,16 +45,6 @@ namespace hal
         rule.mFormat = PythonQssAdapter::instance()->mBraceFormat;
         mHighlightingRules.append(rule);
 
-        rule.mPattern = QRegularExpression(R"('(?:[^'\\]|\\.)*')");
-        rule.mPattern.optimize();
-        rule.mFormat = PythonQssAdapter::instance()->mSingleQuotedStringFormat;
-        mHighlightingRules.append(rule);
-
-        rule.mPattern = QRegularExpression(R"("(?:[^"\\]|\\.)*")");
-        rule.mPattern.optimize();
-        rule.mFormat = PythonQssAdapter::instance()->mDoubleQuotedStringFormat;
-        mHighlightingRules.append(rule);
-
         rule.mPattern = QRegularExpression("\\bself\\b");
         rule.mPattern.optimize();
         rule.mFormat = PythonQssAdapter::instance()->mSelfFormat;
@@ -70,26 +59,6 @@ namespace hal
         rule.mPattern.optimize();
         rule.mFormat = PythonQssAdapter::instance()->mNumberFormat;
         mHighlightingRules.append(rule);
-
-        // match a '#' that is not inside a string literal
-        //
-        //   \G         anchor the match at the offset it is given
-        //   (?: ... )* consume everything that cannot start a comment:
-        //                [^"'#\\]  an ordinary character
-        //                \\.       an escape, so \" does not end a string
-        //                "..."     a complete double quoted string
-        //                '...'     a complete single quoted string
-        //   \K         drop all of that from the reported match
-        //   #.*        the comment itself
-        //
-        //     print("#")  # here
-        //     |________|  |
-        //      consumed   reported as the match
-        //
-        // an unterminated quote never gets past the loop, so a '#' inside an
-        // unclosed string or after an opening """ is left alone
-        mSingleLineComment = QRegularExpression(R"(\G(?:[^"'#\\]|\\.|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')*\K#.*)");
-        mSingleLineComment.optimize();
     }
 
     void PythonSyntaxHighlighter::highlightBlock(const QString& text)
@@ -106,99 +75,207 @@ namespace hal
             }
         }
 
-        // 0 no open comment in block
-        // 1 contains tripple single quote start and no tripple single quote end OR follows a "1" block and also doesnt contain the end
-        // 2 contains tripple double quote start and no tripple double quote end OR follows a "2" block and also doesnt contain the end
+        const PythonQssAdapter* adapter = PythonQssAdapter::instance();
+        auto stringFormat               = [adapter](QChar quote) -> const QTextCharFormat& { return quote == '"' ? adapter->mDoubleQuotedStringFormat : adapter->mSingleQuotedStringFormat; };
 
-        int current_index = 0;
+        QVector<ScanFrame> frames = decodeState(previousBlockState());
+        auto openField            = [&frames]() {
+            ScanFrame field;
+            field.mField = true;
+            frames.append(field);
+        };
+        const int length = text.length();
+        bool continued   = false;
+        int i            = 0;
 
-        if (previousBlockState() == 1)
+        while (i < length)
         {
-            current_index = closeMultilineComment(text, mTrippleSingleQuote);
+            const QChar c = text.at(i);
 
-            if (current_index < 0)
+            if (frames.isEmpty() || (frames.last().mField && !frames.last().mInFormatSpec))
             {
-                setCurrentBlockState(1);
-                return;
-            }
-        }
-
-        if (previousBlockState() == 2)
-        {
-            current_index = closeMultilineComment(text, mTrippleDoubleQuote);
-
-            if (current_index < 0)
-            {
-                setCurrentBlockState(2);
-                return;
-            }
-        }
-
-        int comment_index = mSingleLineComment.match(text, current_index).capturedStart();
-        if (comment_index >= 0)
-            setFormat(comment_index, text.length() - comment_index, PythonQssAdapter::instance()->mCommentFormat);
-
-        QRegularExpressionMatch match = mMultiLineCommentDelimiter.match(text, current_index);
-
-        while (match.hasMatch() && (comment_index < 0 || match.capturedStart() < comment_index))
-        {
-            // check which delimiter was found
-            // check for closing delimiter
-            // found -> loop again
-            // not found -> set block state and return
-
-            int comment_start_index = match.capturedStart();
-            QChar comment_type      = text.at(comment_start_index);
-
-            if (comment_type == '\'')
-            {
-                QRegularExpressionMatch single_match = mTrippleSingleQuote.match(text, comment_start_index + 3);
-                int single_match_index               = single_match.capturedStart();
-
-                if (single_match_index < 0)
+                // code, at the top level or inside a replacement field of an f-string
+                if (c == '#')
                 {
-                    setCurrentBlockState(1);
-                    setFormat(comment_start_index, text.length() - comment_start_index, PythonQssAdapter::instance()->mCommentFormat);
-                    return;
+                    setFormat(i, length - i, adapter->mCommentFormat);
+                    break;
+                }
+
+                int quote = i;
+                if (c.isLetter() || c == '_')
+                {
+                    while (quote < length && (text.at(quote).isLetterOrNumber() || text.at(quote) == '_'))
+                    {
+                        ++quote;
+                    }
+                    if (quote == length || (text.at(quote) != '\'' && text.at(quote) != '"') || !mStringPrefixes.contains(text.mid(i, quote - i), Qt::CaseInsensitive))
+                    {
+                        i = quote;
+                        continue;
+                    }
+                }
+
+                if (text.at(quote) == '\'' || text.at(quote) == '"')
+                {
+                    const QString prefix = text.mid(i, quote - i);
+                    ScanFrame string;
+                    string.mQuote     = text.at(quote);
+                    string.mTriple    = text.mid(quote, 3) == QString(3, string.mQuote);
+                    string.mFormatted = prefix.contains('f', Qt::CaseInsensitive);
+                    string.mRaw       = prefix.contains('r', Qt::CaseInsensitive);
+                    const int start   = quote + (string.mTriple ? 3 : 1);
+                    setFormat(i, start - i, stringFormat(string.mQuote));
+                    frames.append(string);
+                    i = start;
+                    continue;
+                }
+
+                if (!frames.isEmpty())
+                {
+                    ScanFrame& field = frames.last();
+                    if (c == '(' || c == '[' || c == '{')
+                    {
+                        ++field.mBracketDepth;
+                    }
+                    else if ((c == ')' || c == ']' || c == '}') && field.mBracketDepth > 0)
+                    {
+                        --field.mBracketDepth;
+                    }
+                    else if (c == '}')
+                    {
+                        frames.removeLast();
+                    }
+                    else if (c == ':' && field.mBracketDepth == 0)
+                    {
+                        field.mInFormatSpec = true;
+                    }
+                }
+                ++i;
+            }
+            else if (frames.last().mField)
+            {
+                // a format spec is text of its f-string, apart from the fields nested in it
+                if (c == '{')
+                {
+                    openField();
+                }
+                else if (c == '}')
+                {
+                    frames.removeLast();
                 }
                 else
                 {
-                    setFormat(comment_start_index, comment_start_index - single_match_index + 3, PythonQssAdapter::instance()->mCommentFormat);
-                    match = mMultiLineCommentDelimiter.match(text, single_match_index + 3);
+                    int owner = frames.size() - 1;
+                    while (owner > 0 && frames.at(owner).mField)
+                    {
+                        --owner;
+                    }
+                    setFormat(i, 1, stringFormat(frames.at(owner).mQuote));
                 }
+                ++i;
             }
             else
             {
-                QRegularExpressionMatch double_match = mTrippleDoubleQuote.match(text, comment_start_index + 3);
-                int double_match_index               = double_match.capturedStart();
+                const ScanFrame string = frames.last();
+                int step               = 1;
 
-                if (double_match_index < 0)
+                if (c == string.mQuote && (!string.mTriple || text.mid(i, 3) == QString(3, c)))
                 {
-                    setCurrentBlockState(2);
-                    setFormat(comment_start_index, text.length() - comment_start_index, PythonQssAdapter::instance()->mCommentFormat);
-                    return;
+                    step = string.mTriple ? 3 : 1;
+                    frames.removeLast();
                 }
-                else
+                else if (c == '\\')
                 {
-                    setFormat(comment_start_index, comment_start_index - double_match_index + 3, PythonQssAdapter::instance()->mCommentFormat);
-                    match = mMultiLineCommentDelimiter.match(text, double_match_index + 3);
+                    const QChar next = i + 1 < length ? text.at(i + 1) : QChar();
+                    if (next.isNull())
+                    {
+                        continued = true;
+                    }
+                    // a backslash does not escape a brace in an f-string
+                    else if (string.mFormatted && (next == '{' || next == '}'))
+                    {
+                        step = 1;
+                    }
+                    // the braces of a \N{...} escape are not a replacement field
+                    else if (string.mFormatted && !string.mRaw && next == 'N' && i + 2 < length && text.at(i + 2) == '{')
+                    {
+                        const int close = text.indexOf('}', i + 3);
+                        step            = (close < 0 ? length : close + 1) - i;
+                    }
+                    else
+                    {
+                        step = 2;
+                    }
                 }
+                else if (string.mFormatted && (c == '{' || c == '}'))
+                {
+                    if (i + 1 < length && text.at(i + 1) == c)
+                    {
+                        step = 2;
+                    }
+                    else if (c == '{')
+                    {
+                        openField();
+                        ++i;
+                        continue;
+                    }
+                }
+                setFormat(i, step, stringFormat(string.mQuote));
+                i += step;
             }
         }
-        setCurrentBlockState(0);
-        return;
+
+        // a string that is not triple quoted ends with its line, unless the line ends in a backslash
+        if (!frames.isEmpty() && !frames.last().mField && !frames.last().mTriple && !continued)
+        {
+            frames.removeLast();
+        }
+
+        setCurrentBlockState(encodeState(frames));
     }
 
-    int PythonSyntaxHighlighter::closeMultilineComment(const QString& text, const QRegularExpression& delimiter, const int offset)
+    int PythonSyntaxHighlighter::encodeState(const QVector<ScanFrame>& frames)
     {
-        QRegularExpressionMatch match = delimiter.match(text, offset);
-        int index                     = match.capturedEnd();
+        // 3 bits for the number of frames, then 5 bits for each frame, outermost first
+        const int count = qMin(int(frames.size()), 5);
+        int state       = count;
+        for (int k = 0; k < count; ++k)
+        {
+            const ScanFrame& frame = frames.at(k);
+            const int bits =
+                frame.mField ? 1 | frame.mInFormatSpec << 1 | qMin(frame.mBracketDepth, 7) << 2 : (frame.mQuote == '"') << 1 | frame.mTriple << 2 | frame.mFormatted << 3 | frame.mRaw << 4;
+            state |= bits << (3 + 5 * k);
+        }
+        return state;
+    }
 
-        if (index < 0)
-            setFormat(offset, text.length() - offset, PythonQssAdapter::instance()->mCommentFormat);
-        else
-            setFormat(offset, index - offset, PythonQssAdapter::instance()->mCommentFormat);
+    QVector<PythonSyntaxHighlighter::ScanFrame> PythonSyntaxHighlighter::decodeState(int state)
+    {
+        QVector<ScanFrame> frames;
+        if (state <= 0)
+        {
+            return frames;
+        }
 
-        return index;
+        for (int k = 0; k < (state & 7); ++k)
+        {
+            const int bits = state >> (3 + 5 * k) & 31;
+            ScanFrame frame;
+            frame.mField = bits & 1;
+            if (frame.mField)
+            {
+                frame.mInFormatSpec = bits & 2;
+                frame.mBracketDepth = bits >> 2;
+            }
+            else
+            {
+                frame.mQuote     = bits & 2 ? '"' : '\'';
+                frame.mTriple    = bits & 4;
+                frame.mFormatted = bits & 8;
+                frame.mRaw       = bits & 16;
+            }
+            frames.append(frame);
+        }
+        return frames;
     }
 }
