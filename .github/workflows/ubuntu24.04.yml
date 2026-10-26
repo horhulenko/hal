@@ -25,8 +25,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           # cmake/hal_cmake_tools.cmake derives the HAL version through 'git describe --tags',
-          # so the full history including tags is required
+          # so the full history including tags is required. That only needs the commits though,
+          # tree:0 skips the 4+ GB of old file contents and fetches the current tree on demand.
           fetch-depth: 0
+          filter: tree:0
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -36,18 +38,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Prepare ccache timestamp
-        id: ccache_cache_timestamp
-        shell: bash
-        run: echo "timestamp=$(date -u +'%Y-%m-%d-%H-%M-%S')" >> "$GITHUB_OUTPUT"
-
-      - name: ccache cache files
-        uses: actions/cache@v4
+      # One ccache per toolchain, a cache built by another compiler never hits. Only pushes to master
+      # save it and pull requests restore master's, so PRs don't eat up the 10 GB cache budget.
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
         with:
           path: ${{runner.workspace}}/.ccache
-          key: ${{ runner.OS }}-ccache-${{ steps.ccache_cache_timestamp.outputs.timestamp }}
+          key: ccache-ubuntu-24.04-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.OS }}-ccache-
+            ccache-ubuntu-24.04-
 
       - name: Install Dependencies
         run: ./install_dependencies.sh
@@ -70,12 +69,12 @@ jobs:
           export BUILD_TYPE=Debug
           cp $GITHUB_WORKSPACE/documentation/index.html doc/
           $GITHUB_WORKSPACE/tools/genversion.py $GITHUB_WORKSPACE
-          cmake -G Ninja $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DBUILD_ALL_PLUGINS=ON -DBUILD_TESTS=ON -DBUILD_COVERAGE=ON -DPL_GUI=ON -DBUILD_DOCUMENTATION=ON -DPACKAGE_DEB=OFF -DCMAKE_INSTALL_PREFIX=/usr/
+          cmake -G Ninja $GITHUB_WORKSPACE -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DBUILD_ALL_PLUGINS=ON -DBUILD_TESTS=ON -DPL_GUI=ON -DBUILD_DOCUMENTATION=ON -DPACKAGE_DEB=OFF -DCMAKE_INSTALL_PREFIX=/usr/
         env:
           CCACHE_DIR: ${{runner.workspace}}/.ccache
           CCACHE_COMPRESS: true
           CCACHE_COMPRESSLEVEL: 6
-          CCACHE_MAXSIZE: 400M
+          CCACHE_MAXSIZE: 2G
           HAL_BASE_PATH: ${{runner.workspace}}/hal/build
 
       - name: Build
@@ -96,7 +95,7 @@ jobs:
           CCACHE_DIR: ${{runner.workspace}}/.ccache
           CCACHE_COMPRESS: true
           CCACHE_COMPRESSLEVEL: 6
-          CCACHE_MAXSIZE: 400M
+          CCACHE_MAXSIZE: 2G
           HAL_BASE_PATH: ${{runner.workspace}}/hal/build
 
       - name: Test
@@ -115,4 +114,17 @@ jobs:
           CCACHE_DIR: ${{runner.workspace}}/.ccache
           CCACHE_COMPRESS: true
           CCACHE_COMPRESSLEVEL: 6
-          CCACHE_MAXSIZE: 400M
+          CCACHE_MAXSIZE: 2G
+
+      - name: ccache statistics
+        if: ${{ !cancelled() }}
+        run: ccache -s
+        env:
+          CCACHE_DIR: ${{runner.workspace}}/.ccache
+
+      - name: Save ccache
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{runner.workspace}}/.ccache
+          key: ccache-ubuntu-24.04-${{ github.run_id }}-${{ github.run_attempt }}
